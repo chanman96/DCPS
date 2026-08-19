@@ -37,6 +37,7 @@ document.addEventListener('DOMContentLoaded', () => {
   initMap();
   connectWebSockets();
   setupStopButton();
+  loadPresets();
 });
 
 /* ---------- Tabs ---------- */
@@ -652,6 +653,7 @@ async function loadMaps(vid) {
   renderMap('map-fuel', 'fuel', m.fuel, [10, 100], diffMatrix(prev?.fuel, m.fuel));
   renderMap('map-timing', 'timing', m.timing, [0, 25], diffMatrix(prev?.timing, m.timing));
   renderMap('map-boost', 'boost', m.boost, [0, 250], diffMatrix(prev?.boost, m.boost));
+  renderMap('map-usage', 'usage', m.usage || [], [0, 100], new Map(), false);
   state.mapsPrev[vid] = { fuel: cloneMatrix(m.fuel), timing: cloneMatrix(m.timing), boost: cloneMatrix(m.boost) };
   // Sliders
   const bind = (id, val) => {
@@ -664,6 +666,47 @@ async function loadMaps(vid) {
   bind('t-gov', m.tune.speed_governor_kph);
   bind('t-trim', m.tune.fuel_trim_pct);
   loadTuneEvents(vid);
+}
+
+/* ---------- Preset ECU tunes ---------- */
+
+async function loadPresets() {
+  const r = await fetch('/api/presets');
+  if (!r.ok) return;
+  const { presets } = await r.json();
+  state.presets = presets;
+  const el = document.getElementById('preset-buttons');
+  if (!el) return;
+  el.innerHTML = '';
+  presets.forEach(p => {
+    const btn = document.createElement('button');
+    btn.className = 'btn preset-btn';
+    btn.textContent = p.label;
+    btn.title = p.note;
+    btn.addEventListener('click', () => applyPreset(p.key, p.note, btn));
+    el.appendChild(btn);
+  });
+}
+
+async function applyPreset(key, note, btn) {
+  if (!state.selectedId) return;
+  const noteEl = document.getElementById('preset-note');
+  const prevText = btn.textContent;
+  btn.disabled = true;
+  btn.classList.add('on');
+  btn.textContent = 'Applying…';
+  try {
+    await fetch('/api/preset', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ vehicle_id: state.selectedId, preset: key })
+    });
+    if (noteEl) noteEl.textContent = note;
+    await loadMaps(state.selectedId);
+  } finally {
+    btn.textContent = prevText;
+    btn.disabled = false;
+    setTimeout(() => btn.classList.remove('on'), 700);
+  }
 }
 
 /* ---------- ECU tuning -> driver behavior log ---------- */
@@ -728,7 +771,27 @@ function heatColor(v, lo, hi) {
   return `rgb(${r},${g},${bl})`;
 }
 
-function renderMap(elId, which, matrix, range, changed = new Map()) {
+function heatColorUsage(v, lo, hi) {
+  const t = Math.max(0, Math.min(1, (v - lo) / (hi - lo)));
+  // deep navy -> teal, distinct from the amber/red calibration palette so a read-only
+  // behavior surface never looks editable at a glance
+  const stops = [
+    { t: 0,   r: 13,  g: 40,  b: 65  },
+    { t: 0.5, r: 30,  g: 130, b: 130 },
+    { t: 1,   r: 90,  g: 225, b: 205 },
+  ];
+  let a = stops[0], b = stops[stops.length - 1];
+  for (let i = 0; i < stops.length - 1; i++) {
+    if (t >= stops[i].t && t <= stops[i+1].t) { a = stops[i]; b = stops[i+1]; break; }
+  }
+  const lt = (t - a.t) / (b.t - a.t);
+  const r = Math.round(a.r + (b.r - a.r) * lt);
+  const g = Math.round(a.g + (b.g - a.g) * lt);
+  const bl = Math.round(a.b + (b.b - a.b) * lt);
+  return `rgb(${r},${g},${bl})`;
+}
+
+function renderMap(elId, which, matrix, range, changed = new Map(), editable = true) {
   const el = document.getElementById(elId);
   el.innerHTML = '';
   // Reverse rows so load increases upward
@@ -738,9 +801,16 @@ function renderMap(elId, which, matrix, range, changed = new Map()) {
       const r = matrix.length - 1 - ri;
       const cell = document.createElement('div');
       cell.className = 'cell';
-      cell.style.background = heatColor(val, range[0], range[1]);
-      cell.textContent = Number(val).toFixed(0);
-      cell.title = `RPM bin ${ci} · Load bin ${r} · ${val}`;
+      if (which === 'usage') {
+        cell.classList.add('cell-readonly');
+        cell.style.background = heatColorUsage(val, range[0], range[1]);
+        cell.textContent = val >= 1 ? Number(val).toFixed(0) : '';
+        cell.title = `RPM bin ${ci} · Load bin ${r} · ${val.toFixed(0)}% of this driver's busiest cell`;
+      } else {
+        cell.style.background = heatColor(val, range[0], range[1]);
+        cell.textContent = Number(val).toFixed(0);
+        cell.title = `RPM bin ${ci} · Load bin ${r} · ${val}`;
+      }
       cell.dataset.row = String(r);
       cell.dataset.col = String(ci);
       const delta = changed.get(`${r},${ci}`);
@@ -748,7 +818,7 @@ function renderMap(elId, which, matrix, range, changed = new Map()) {
         cell.classList.add('cell-changed', delta > 0 ? 'delta-up' : 'delta-down');
         cell.dataset.delta = (delta > 0 ? '+' : '') + delta.toFixed(1);
       }
-      cell.addEventListener('click', () => editCell(cell, which, matrix, range));
+      if (editable) cell.addEventListener('click', () => editCell(cell, which, matrix, range));
       el.appendChild(cell);
     });
   });

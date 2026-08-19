@@ -162,6 +162,12 @@
         <div class="maps-sub">Edit sliders or click a heatmap cell. Changes push to the ECU immediately — cells flash and show a delta badge whenever their value changes, live.</div>
       </div>
 
+      <div class="preset-row">
+        <div class="preset-row-label">Preset tunes</div>
+        <div class="preset-buttons" id="preset-buttons"></div>
+        <div class="preset-note" id="preset-note">Push a full known calibration in one click, then watch pedal % and fatigue on Vehicle detail respond.</div>
+      </div>
+
       <div class="tune-row">
         <div class="tune-slider">
           <label>Idle RPM target</label>
@@ -203,6 +209,13 @@
           <div class="map-axis-label-y">Load ↑</div>
           <div id="map-boost" class="ecu-map"></div>
           <div class="map-axis-label-x">RPM →</div>
+        </div>
+        <div class="map-card map-card-readonly">
+          <div class="map-card-title">Driver usage · dwell time</div>
+          <div class="map-axis-label-y">Load ↑</div>
+          <div id="map-usage" class="ecu-map"></div>
+          <div class="map-axis-label-x">RPM →</div>
+          <div class="map-card-note">Where this driver actually spends time on the map, recent-weighted. Read-only — compare it against the fuel map to see which cells matter for their tuning.</div>
         </div>
       </div>
 

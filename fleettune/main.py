@@ -14,6 +14,7 @@ from pydantic import BaseModel
 
 from .simulator import FleetSimulator
 from .faults import FAULT_LABELS
+from .presets import ECU_PRESETS, PRESET_ORDER
 
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -45,6 +46,10 @@ class MapUpdate(BaseModel):
     vehicle_id: str
     which: str    # "fuel" | "timing" | "boost"
     matrix: list[list[float]]
+
+class PresetAction(BaseModel):
+    vehicle_id: str
+    preset: str
 
 
 # ---------- App factory ----------
@@ -128,6 +133,19 @@ def create_app(sim: FleetSimulator) -> FastAPI:
     async def map_update(u: MapUpdate):
         ok = sim.apply_map(u.vehicle_id, u.which, u.matrix)
         if not ok: raise HTTPException(400, "invalid vehicle or map name")
+        return {"ok": True}
+
+    @app.get("/api/presets")
+    async def presets_list():
+        return {"presets": [
+            {"key": k, "label": ECU_PRESETS[k]["label"], "note": ECU_PRESETS[k]["note"]}
+            for k in PRESET_ORDER
+        ]}
+
+    @app.post("/api/preset")
+    async def preset_apply(action: PresetAction):
+        ok = sim.apply_preset(action.vehicle_id, action.preset)
+        if not ok: raise HTTPException(400, "invalid vehicle or preset")
         return {"ok": True}
 
     @app.get("/api/alerts")

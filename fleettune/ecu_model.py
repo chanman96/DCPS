@@ -91,6 +91,18 @@ def _gear_for_speed(speed_kph: float) -> int:
     return 10
 
 
+def _bin_indices(rpm: float, load_pct: float) -> tuple[int, int]:
+    """Nearest (load, rpm) bin for a given engine state — same grid as the calibration maps,
+    but a single nearest cell rather than _map_lookup's bilinear blend, since this feeds a
+    dwell-time histogram rather than an interpolated readout."""
+    rpm_norm = max(0, min(1, (rpm - 600) / 1600)) * (MAP_SIZE - 1)
+    load_norm = max(0, min(1, load_pct / 100)) * (MAP_SIZE - 1)
+    return int(round(load_norm)), int(round(rpm_norm))
+
+
+USAGE_DECAY_TAU_S = 180.0  # recent-weighted so the heatmap tracks current driving, not all-session history
+
+
 def _map_lookup(m: list[list[float]], rpm: float, load_pct: float) -> float:
     """Bilinear lookup on an 8x8 map. RPM in [600, 2200], load in [0, 100]."""
     rpm_norm = max(0, min(1, (rpm - 600) / 1600)) * (MAP_SIZE - 1)
@@ -185,6 +197,9 @@ class Vehicle:
         self._gear_cooldown = 0.0
         # Fuel-map derived power factor (ECU tuning -> driver throttle response)
         self.power_factor = 1.0
+        # Driver usage heatmap: recent-weighted dwell time per RPM/load bin, same grid as
+        # the calibration maps — shows which cells this specific driver actually operates in.
+        self.usage_seconds: list[list[float]] = [[0.0] * MAP_SIZE for _ in range(MAP_SIZE)]
 
     # ---- Driver inputs (called by Simulator with route info) ----
 
@@ -283,6 +298,14 @@ class Vehicle:
         e.engine_load_pct = max(0, min(100, e.engine_load_pct - torque_loss))
         e.accel_pedal_pct = self._driver_throttle * 100
         e.engine_throttle_valve_pos_pct = e.accel_pedal_pct * 0.9
+
+        # ---- Driver usage heatmap ----
+        decay = math.exp(-dt / USAGE_DECAY_TAU_S)
+        for row in self.usage_seconds:
+            for i in range(MAP_SIZE):
+                row[i] *= decay
+        li, ri = _bin_indices(e.engine_rpm, e.engine_load_pct)
+        self.usage_seconds[li][ri] += dt
 
         # ---- ECU MAP LOOKUPS ("act" step visible here) ----
         fuel_duty = _map_lookup(e.fuel_map, e.engine_rpm, e.engine_load_pct)
@@ -418,3 +441,12 @@ class Vehicle:
 
     def set_active_dtcs(self, dtcs: list[dict]):
         self._active_dtcs = dtcs
+
+    def usage_map(self) -> list[list[float]]:
+        """0-100 heatmap of where this driver actually operates, normalized against their
+        own busiest cell (not the fleet's) so it reads clearly regardless of how long the
+        vehicle has been running. Read-only — a behavior readout, not a calibration surface."""
+        flat_max = max((v for row in self.usage_seconds for v in row), default=0)
+        if flat_max <= 0:
+            return [[0.0] * MAP_SIZE for _ in range(MAP_SIZE)]
+        return [[round(v / flat_max * 100, 1) for v in row] for row in self.usage_seconds]

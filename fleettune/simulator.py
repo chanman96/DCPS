@@ -16,6 +16,7 @@ from .routes import generate_route, haversine_km, interpolate
 from .j1939 import build_frames, J1939Frame
 from .analyzer import Analyzer
 from .excel_logger import ExcelLogger, LOG_INTERVAL_S
+from .presets import ECU_PRESETS
 
 
 TICK_HZ = 10   # 10 Hz ECU tick
@@ -28,6 +29,12 @@ FLUSH_EVERY_N_LOGS = 10                        # ~20s of sim time between disk f
 HARSH_BRAKE_KPH_S = -11.0
 HARSH_ACCEL_KPH_S = 11.0
 HARSH_EVENT_WINDOW_S = 600   # "recent" harsh events considered for the driver score (10 min)
+# Refractory period after logging a harsh event. Without this, a single excursion above
+# threshold (e.g. the launch from a dead stop, which stays above HARSH_ACCEL_KPH_S for
+# several consecutive 100 ms ticks) gets counted once per tick instead of once per event —
+# that's what was making "aggressive driving" alerts fire on every vehicle within seconds
+# of a fresh start, before any actually aggressive driving had happened.
+HARSH_EVENT_COOLDOWN_S = 2.5
 
 
 @dataclass
@@ -51,6 +58,8 @@ class VehicleRuntime:
     prev_speed_kph: float = 0.0
     harsh_brake_ts: deque = field(default_factory=lambda: deque(maxlen=200))
     harsh_accel_ts: deque = field(default_factory=lambda: deque(maxlen=200))
+    harsh_brake_cooldown: float = 0.0
+    harsh_accel_cooldown: float = 0.0
     idle_seconds: float = 0.0
     idle_fuel_l: float = 0.0
     tune_events: deque = field(default_factory=lambda: deque(maxlen=25))
@@ -109,6 +118,11 @@ class FleetSimulator:
     def _build_fleet(self, n: int):
         # Replace the vehicle dictionary so reconfiguration replaces the fleet instead of appending
         self.vehicles = {}
+        # Fresh Analyzer so a rebuild (initial construction or admin reconfigure) starts with
+        # a clean alerts board — vehicle IDs are deterministic (TRK-001, TRK-002, ...) so without
+        # this, alerts and rolling history from the previous fleet would still be attached to the
+        # new vehicles the moment they're built.
+        self.analyzer = Analyzer()
         rng = random.Random(42)
         profiles = ["eco", "normal", "normal", "aggressive"]
         for i in range(n):
@@ -238,10 +252,24 @@ class FleetSimulator:
         if not rt: return None
         e = rt.vehicle.ecu
         return {"fuel": e.fuel_map, "timing": e.timing_map, "boost": e.boost_map,
+                "usage": rt.vehicle.usage_map(),
                 "tune": {"idle_rpm_target": e.idle_rpm_target,
                           "rev_limit_rpm": e.rev_limit_rpm,
                           "speed_governor_kph": e.speed_governor_kph,
                           "fuel_trim_pct": e.fuel_trim_pct}}
+
+    def apply_preset(self, vid: str, preset_key: str) -> bool:
+        rt = self.vehicles.get(vid)
+        preset = ECU_PRESETS.get(preset_key)
+        if not rt or not preset: return False
+        e = rt.vehicle.ecu
+        e.fuel_map = [row[:] for row in preset["fuel_map"]]
+        e.timing_map = [row[:] for row in preset["timing_map"]]
+        e.boost_map = [row[:] for row in preset["boost_map"]]
+        for k, v in preset["tune"].items():
+            setattr(e, k, v)
+        self._log_tune_event(rt, "preset", f"Applied preset '{preset['label']}'")
+        return True
 
     def fault_status(self, vid: str) -> dict:
         rt = self.vehicles.get(vid)
@@ -342,12 +370,16 @@ class FleetSimulator:
     def _track_behavior(self, rt: VehicleRuntime, dt: float):
         e = rt.vehicle.ecu
         speed = e.vehicle_speed_kph
+        rt.harsh_brake_cooldown = max(0, rt.harsh_brake_cooldown - dt)
+        rt.harsh_accel_cooldown = max(0, rt.harsh_accel_cooldown - dt)
         if dt > 0:
             d_speed = (speed - rt.prev_speed_kph) / dt   # kph/s, a rough deceleration/accel proxy
-            if d_speed <= HARSH_BRAKE_KPH_S and rt.prev_speed_kph > 5:
+            if d_speed <= HARSH_BRAKE_KPH_S and rt.prev_speed_kph > 5 and rt.harsh_brake_cooldown <= 0:
                 rt.harsh_brake_ts.append(time.time())
-            elif d_speed >= HARSH_ACCEL_KPH_S and e.accel_pedal_pct > 70:
+                rt.harsh_brake_cooldown = HARSH_EVENT_COOLDOWN_S
+            elif d_speed >= HARSH_ACCEL_KPH_S and e.accel_pedal_pct > 70 and rt.harsh_accel_cooldown <= 0:
                 rt.harsh_accel_ts.append(time.time())
+                rt.harsh_accel_cooldown = HARSH_EVENT_COOLDOWN_S
         rt.prev_speed_kph = speed
 
         if e.ignition_on and speed < 2:
