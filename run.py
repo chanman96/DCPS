@@ -8,6 +8,8 @@ Usage:
   python run.py --vehicles 3 --port 9000 --time-scale 5
 """
 import argparse
+import signal
+import sys
 import uvicorn
 
 from fleettune.simulator import FleetSimulator
