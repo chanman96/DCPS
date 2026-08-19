@@ -339,6 +339,30 @@ const GAUGES = [
   { key: 'total_vehicle_distance_km', label: 'Odometer', unit: 'km', decimals: 0 },
 ];
 
+// Secondary readouts — fluids, filters, and other systems that round out the
+// digital twin without crowding the primary at-a-glance gauge row.
+const SYSTEM_GAUGES = [
+  { key: 'engine_oil_level_pct', label: 'Oil level', unit: '%', decimals: 0,
+    warn: v => v < 30, crit: v => v < 15 },
+  { key: 'coolant_level_pct', label: 'Coolant level', unit: '%', decimals: 0,
+    warn: v => v < 40, crit: v => v < 20 },
+  { key: 'coolant_pressure_kpa', label: 'Coolant pressure', unit: 'kPa', decimals: 0 },
+  { key: 'engine_oil_filter_diff_pressure_kpa', label: 'Oil filter ΔP', unit: 'kPa', decimals: 0,
+    warn: v => v > 80, crit: v => v > 120 },
+  { key: 'air_filter_diff_pressure_kpa', label: 'Air filter ΔP', unit: 'kPa', decimals: 1,
+    warn: v => v > 4, crit: v => v > 6 },
+  { key: 'fuel_filter_diff_pressure_kpa', label: 'Fuel filter ΔP', unit: 'kPa', decimals: 0,
+    warn: v => v > 40, crit: v => v > 60 },
+  { key: 'fuel_delivery_pressure_kpa', label: 'Fuel delivery', unit: 'kPa', decimals: 0 },
+  { key: 'crankcase_pressure_kpa', label: 'Crankcase pressure', unit: 'kPa', decimals: 1 },
+  { key: 'air_inlet_pressure_kpa', label: 'Air inlet', unit: 'kPa', decimals: 0 },
+  { key: 'intake_manifold_temp_c', label: 'Intake air', unit: '°C', decimals: 0 },
+  { key: 'fuel_temp_c', label: 'Fuel temp', unit: '°C', decimals: 0 },
+  { key: 'cab_interior_temp_c', label: 'Cab temp', unit: '°C', decimals: 0 },
+  { key: 'engine_throttle_valve_pos_pct', label: 'Throttle valve', unit: '%', decimals: 0 },
+  { key: 'washer_fluid_pct', label: 'Washer fluid', unit: '%', decimals: 0, warn: v => v < 15 },
+];
+
 function renderDetail(vid) {
   const v = state.vehicles[vid]; if (!v || !v.telemetry) return;
   document.getElementById('detail-title').textContent = v.id + ' · ' + v.label.split('·')[1].trim();
@@ -359,6 +383,46 @@ function renderDetail(vid) {
     div.innerHTML = `<div class="gauge-label">${g.label}</div>
       <div class="gauge-value ${cls}">${shown}<span class="gauge-unit">${g.unit}</span></div>`;
     gaugesEl.appendChild(div);
+  });
+
+  // Secondary gauges (fluids, filters, systems)
+  const sysEl = document.getElementById('gauges-systems');
+  sysEl.innerHTML = '';
+  SYSTEM_GAUGES.forEach(g => {
+    const val = v.telemetry[g.key];
+    let cls = '';
+    if (g.crit && g.crit(val)) cls = 'critical';
+    else if (g.warn && g.warn(val)) cls = 'warn';
+    const shown = g.format ? g.format(val, v.telemetry) : Number(val).toFixed(g.decimals);
+    const div = document.createElement('div');
+    div.className = 'gauge';
+    div.innerHTML = `<div class="gauge-label">${g.label}</div>
+      <div class="gauge-value ${cls}">${shown}<span class="gauge-unit">${g.unit}</span></div>`;
+    sysEl.appendChild(div);
+  });
+
+  // Vehicle identity / trip
+  document.getElementById('d-region').textContent = v.label.includes('·') ? v.label.split('·')[1].trim() : '—';
+  document.getElementById('d-trip').textContent = v.telemetry.trip_distance_km.toFixed(1) + ' km';
+  document.getElementById('d-odo').textContent = v.telemetry.total_vehicle_distance_km.toFixed(0) + ' km';
+  document.getElementById('d-hours').textContent = v.telemetry.engine_total_hours.toFixed(0) + ' h';
+  document.getElementById('d-econ').textContent = v.telemetry.fuel_economy_kmpl > 0
+    ? v.telemetry.fuel_economy_kmpl.toFixed(2) + ' km/L' : '—';
+  document.getElementById('d-pos').textContent = `${v.lat.toFixed(4)}, ${v.lng.toFixed(4)} · ${v.heading_deg.toFixed(0)}°`;
+
+  // Fault status (read-only summary; injection happens on the Fault injection tab)
+  const faultEl = document.getElementById('detail-fault-list');
+  faultEl.innerHTML = '';
+  state.faultTypes.forEach(ft => {
+    const phase = (v.faults || {})[ft.kind] || 'inactive';
+    const card = document.createElement('div');
+    card.className = 'fault-card';
+    card.innerHTML = `
+      <div class="fault-info">
+        <div class="fault-name">${ft.label}</div>
+        <div class="fault-phase ${phase}">${phase}</div>
+      </div>`;
+    faultEl.appendChild(card);
   });
 
   // Ignition button

@@ -262,12 +262,19 @@ html, body {
 .btn-ghost { background: transparent; }
 .btn.on { background: var(--amber); color: #08131e; border-color: var(--amber); }
 
+.section-label {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--text-dim); margin: 4px 0 10px;
+  font-family: var(--mono);
+}
+
 .gauges {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
   gap: 10px;
   margin-bottom: 20px;
 }
+.gauges-secondary .gauge-value { font-size: 17px; }
 .gauge {
   background: var(--bg-panel);
   border: 1px solid var(--border);
@@ -310,6 +317,7 @@ html, body {
 .detail-cards {
   display: grid; grid-template-columns: 1fr 1fr; gap: 12px;
 }
+.card-wide { grid-column: 1 / -1; }
 .card {
   background: var(--bg-panel);
   border: 1px solid var(--border);
@@ -607,6 +615,11 @@ html, body {
 }
 .fault-toggle.on { background: var(--red); color: #fff; border-color: var(--red); }
 .fault-toggle:hover:not(.on) { border-color: var(--amber-dim); }
+
+.faults-list-compact {
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+}
+.faults-list-compact .fault-card { padding: 8px 12px; }
 
 /* ---------- Scrollbars ---------- */
 

@@ -27,8 +27,9 @@ class Fault:
     kind: str
     phase: Phase = Phase.INACTIVE
     elapsed_s: float = 0.0
-    # Time budget from developing -> active
-    develop_seconds: float = 90.0
+    # Time budget from developing -> active. Faults activate immediately on
+    # injection (0s) so effects are visible right away instead of ramping up.
+    develop_seconds: float = 0.0
 
     def start_developing(self):
         self.phase = Phase.DEVELOPING
@@ -65,7 +66,7 @@ class Fault:
 @dataclass
 class CoolantOverheat(Fault):
     kind: str = "coolant_overheat"
-    develop_seconds: float = 180.0
+    develop_seconds: float = 0.0
 
     def _apply(self, dt, ecu):
         # Developing: slow drift +0.02°C/s above equilibrium; Active: +0.15°C/s
@@ -76,7 +77,7 @@ class CoolantOverheat(Fault):
 @dataclass
 class OilPressureDecay(Fault):
     kind: str = "oil_pressure_low"
-    develop_seconds: float = 240.0
+    develop_seconds: float = 0.0
 
     def _apply(self, dt, ecu):
         rate = 0.5 if self.phase == Phase.DEVELOPING else 3.0  # kPa/s decay
@@ -86,7 +87,7 @@ class OilPressureDecay(Fault):
 @dataclass
 class InjectorMisfire(Fault):
     kind: str = "injector_misfire"
-    develop_seconds: float = 60.0
+    develop_seconds: float = 0.0
 
     def _apply(self, dt, ecu):
         # RPM roughness + torque loss
@@ -99,7 +100,7 @@ class InjectorMisfire(Fault):
 @dataclass
 class TurboBoostLoss(Fault):
     kind: str = "turbo_boost_loss"
-    develop_seconds: float = 150.0
+    develop_seconds: float = 0.0
 
     def _apply(self, dt, ecu):
         loss = 0.15 if self.phase == Phase.DEVELOPING else 0.55
@@ -109,7 +110,7 @@ class TurboBoostLoss(Fault):
 @dataclass
 class DpfRegenRequired(Fault):
     kind: str = "dpf_regen_required"
-    develop_seconds: float = 300.0
+    develop_seconds: float = 0.0
 
     def _apply(self, dt, ecu):
         # Soot load increases, back pressure grows, fuel economy drops
@@ -122,7 +123,7 @@ class DpfRegenRequired(Fault):
 @dataclass
 class AlternatorFault(Fault):
     kind: str = "alternator_fault"
-    develop_seconds: float = 120.0
+    develop_seconds: float = 0.0
 
     def _apply(self, dt, ecu):
         drop = 0.3 if self.phase == Phase.DEVELOPING else 1.2
@@ -133,7 +134,7 @@ class AlternatorFault(Fault):
 class FuelSiphon(Fault):
     """Removes fuel while the vehicle is stationary. No DTC — only anomaly detection catches this."""
     kind: str = "fuel_siphon"
-    develop_seconds: float = 5.0
+    develop_seconds: float = 0.0
     liters_per_second: float = 0.15   # ~9 L/min siphon rate
 
     def _apply(self, dt, ecu):
@@ -151,7 +152,7 @@ class FuelTheft(Fault):
     whether the truck is parked or moving, mimicking theft during a delivery run rather than
     only while parked overnight. No DTC — only the fuel-theft anomaly detector catches this."""
     kind: str = "fuel_theft"
-    develop_seconds: float = 20.0
+    develop_seconds: float = 0.0
     liters_per_second: float = 0.08   # ~5 L/min tap
 
     def _apply(self, dt, ecu):
@@ -166,7 +167,7 @@ class FuelTheft(Fault):
 class DrowsyDriver(Fault):
     """Modifies driver behavior: reduced steering micro-corrections, occasional lane departures."""
     kind: str = "drowsy_driver"
-    develop_seconds: float = 30.0
+    develop_seconds: float = 0.0
 
     def _apply(self, dt, ecu):
         # Drives a "fatigue push" that the driver model reads

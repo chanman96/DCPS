@@ -87,6 +87,9 @@
 
       <div class="gauges" id="gauges"></div>
 
+      <div class="section-label">Fluids, filters &amp; systems</div>
+      <div class="gauges gauges-secondary" id="gauges-systems"></div>
+
       <div class="chart-grid">
         <div class="chart-card"><div class="chart-title">RPM / Speed</div><canvas id="chart-rpm"></canvas></div>
         <div class="chart-card"><div class="chart-title">Coolant / Oil / EGT (°C)</div><canvas id="chart-thermal"></canvas></div>
@@ -95,6 +98,15 @@
       </div>
 
       <div class="detail-cards">
+        <div class="card">
+          <div class="card-title">Vehicle</div>
+          <div class="kv"><span>Region</span><span id="d-region" class="mono">—</span></div>
+          <div class="kv"><span>Trip distance</span><span id="d-trip" class="mono">—</span></div>
+          <div class="kv"><span>Odometer</span><span id="d-odo" class="mono">—</span></div>
+          <div class="kv"><span>Engine hours</span><span id="d-hours" class="mono">—</span></div>
+          <div class="kv"><span>Fuel economy (rolling)</span><span id="d-econ" class="mono">—</span></div>
+          <div class="kv"><span>Position</span><span id="d-pos" class="mono">—</span></div>
+        </div>
         <div class="card">
           <div class="card-title">Driver</div>
           <div class="kv"><span>Name</span><span id="d-name" class="mono">—</span></div>
@@ -116,6 +128,10 @@
         <div class="card">
           <div class="card-title">Active DTCs</div>
           <div id="dtc-list" class="dtc-list"><div class="empty">No active codes</div></div>
+        </div>
+        <div class="card card-wide">
+          <div class="card-title">Fault status</div>
+          <div id="detail-fault-list" class="faults-list faults-list-compact"></div>
         </div>
       </div>
     </section>
