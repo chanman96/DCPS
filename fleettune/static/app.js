@@ -36,6 +36,7 @@ document.addEventListener('DOMContentLoaded', () => {
   setupCanPause();
   initMap();
   connectWebSockets();
+  setupStopButton();
 });
 
 /* ---------- Tabs ---------- */
@@ -320,6 +321,8 @@ function updateMapMarker(vid) {
 const GAUGES = [
   { key: 'engine_rpm', label: 'RPM', unit: '', decimals: 0 },
   { key: 'vehicle_speed_kph', label: 'Speed', unit: 'kph', decimals: 0 },
+  { key: 'current_gear', label: 'Gear', unit: '', decimals: 0,
+    format: (v, tel) => (v === 0 ? 'N' : String(v)) + (tel.gear_shifting ? ' ⇄' : '') },
   { key: 'engine_load_pct', label: 'Load', unit: '%', decimals: 0 },
   { key: 'coolant_temp_c', label: 'Coolant', unit: '°C', decimals: 1,
     warn: v => v >= 95, crit: v => v >= 105 },
@@ -350,10 +353,11 @@ function renderDetail(vid) {
     let cls = '';
     if (g.crit && g.crit(val)) cls = 'critical';
     else if (g.warn && g.warn(val)) cls = 'warn';
+    const shown = g.format ? g.format(val, v.telemetry) : Number(val).toFixed(g.decimals);
     const div = document.createElement('div');
     div.className = 'gauge';
     div.innerHTML = `<div class="gauge-label">${g.label}</div>
-      <div class="gauge-value ${cls}">${Number(val).toFixed(g.decimals)}<span class="gauge-unit">${g.unit}</span></div>`;
+      <div class="gauge-value ${cls}">${shown}<span class="gauge-unit">${g.unit}</span></div>`;
     gaugesEl.appendChild(div);
   });
 
@@ -376,6 +380,24 @@ function renderDetail(vid) {
   fill.style.width = Math.min(100, v.driver.fatigue_score) + '%';
   fill.style.background = v.driver.fatigue_score >= 75 ? 'var(--red)'
                         : v.driver.fatigue_score >= 55 ? 'var(--amber)' : 'var(--green)';
+
+  // Driving behavior (harsh events, idle waste, composite score)
+  const score = v.driver.driver_score ?? 100;
+  const scoreEl = document.getElementById('d-score');
+  scoreEl.textContent = score.toFixed(0) + ' / 100';
+  scoreEl.classList.remove('warn', 'critical');
+  if (score < 50) scoreEl.classList.add('critical');
+  else if (score < 75) scoreEl.classList.add('warn');
+  const scoreFill = document.getElementById('score-fill');
+  scoreFill.style.width = Math.min(100, score) + '%';
+  scoreFill.style.background = score < 50 ? 'var(--red)' : score < 75 ? 'var(--amber)' : 'var(--green)';
+  document.getElementById('d-harsh-brake').textContent = v.driver.harsh_brake_count ?? 0;
+  document.getElementById('d-harsh-accel').textContent = v.driver.harsh_accel_count ?? 0;
+  document.getElementById('d-idle').textContent = (v.driver.idle_minutes ?? 0).toFixed(1) + ' min';
+  document.getElementById('d-idle-fuel').textContent = (v.driver.idle_fuel_l ?? 0).toFixed(2) + ' L';
+
+  // ECU power factor (fuel map -> throttle response), shown on the ECU maps tab
+  updateTunePowerFactor(v.telemetry);
 
   // DTCs
   const dtcList = document.getElementById('dtc-list');
@@ -577,6 +599,50 @@ async function loadMaps(vid) {
   bind('t-rev', m.tune.rev_limit_rpm);
   bind('t-gov', m.tune.speed_governor_kph);
   bind('t-trim', m.tune.fuel_trim_pct);
+  loadTuneEvents(vid);
+}
+
+/* ---------- ECU tuning -> driver behavior log ---------- */
+
+function updateTunePowerFactor(tel) {
+  const el = document.getElementById('tune-power-factor');
+  if (!el || !tel || tel.ecu_power_factor == null) return;
+  const pf = tel.ecu_power_factor;
+  const note = pf < 0.92 ? ' — detuned, less torque per throttle input'
+             : pf > 1.08 ? ' — over-fueled, reaches the limiter sooner'
+             : ' — near stock';
+  el.textContent = (pf * 100).toFixed(0) + '%' + note;
+}
+
+async function loadTuneEvents(vid) {
+  const r = await fetch(`/api/vehicle/${vid}/tune-events`);
+  if (!r.ok) return;
+  const { events } = await r.json();
+  if (vid === state.selectedId) renderTuneEvents(vid, events);
+}
+
+function renderTuneEvents(vid, events) {
+  const el = document.getElementById('tune-events-list');
+  if (!el) return;
+  if (!events.length) { el.innerHTML = '<div class="empty">No ECU edits yet this session</div>'; return; }
+  const v = state.vehicles[vid];
+  const liveFatigue = v?.driver?.fatigue_score;
+  const livePedal = v?.telemetry?.accel_pedal_pct;
+  const fmt = (n) => (n >= 0 ? '+' : '') + n.toFixed(0);
+  el.innerHTML = events.slice().reverse().map(ev => {
+    const time = new Date(ev.ts * 1000).toLocaleTimeString([], { hour12: false });
+    const fatDelta = liveFatigue != null ? liveFatigue - ev.fatigue_at_change : null;
+    const pedalDelta = livePedal != null ? livePedal - ev.pedal_at_change : null;
+    const fatCls = fatDelta > 2 ? 'up' : fatDelta < -2 ? 'down' : '';
+    const pedCls = pedalDelta > 5 ? 'up' : pedalDelta < -5 ? 'down' : '';
+    return `
+      <div class="tune-event">
+        <span class="te-time">${time}</span>
+        <span class="te-delta ${fatCls}">fatigue ${ev.fatigue_at_change.toFixed(0)} → ${liveFatigue != null ? liveFatigue.toFixed(0) : '—'} <b>${fatDelta != null ? fmt(fatDelta) : ''}</b></span>
+        <span class="te-delta ${pedCls}">pedal ${ev.pedal_at_change.toFixed(0)}% → ${livePedal != null ? livePedal.toFixed(0) : '—'}% <b>${pedalDelta != null ? fmt(pedalDelta) + '%' : ''}</b></span>
+        <div class="te-detail">${ev.detail}</div>
+      </div>`;
+  }).join('');
 }
 
 function heatColor(v, lo, hi) {
@@ -644,6 +710,7 @@ function editCell(cell, which, matrix, range) {
       });
       renderMap('map-' + which, which, matrix, paletteRange, new Map([[`${r},${c}`, delta]]));
       if (state.mapsPrev[state.selectedId]) state.mapsPrev[state.selectedId][which] = cloneMatrix(matrix);
+      loadTuneEvents(state.selectedId);
       return;
     }
     // Repaint entire map with new range awareness (use the *max of range and edited value*)
@@ -662,7 +729,7 @@ function setupTuneSliders() {
     const el = document.getElementById(id);
     const out = document.getElementById(id + '-val');
     el.addEventListener('input', () => { out.textContent = fmt(el.value); });
-    el.addEventListener('change', () => { send({[key]: parseFloat(el.value)}); });
+    el.addEventListener('change', () => { send({[key]: parseFloat(el.value)}).then(() => loadTuneEvents(state.selectedId)); });
   };
   wire('t-idle', 'idle_rpm_target', v => Number(v).toFixed(0));
   wire('t-rev',  'rev_limit_rpm',   v => Number(v).toFixed(0));
@@ -680,6 +747,27 @@ function setupAlertFilters() {
       state.alertFilter = chip.dataset.filter;
       renderAlerts();
     });
+  });
+}
+
+/* ---------- Stop / shutdown ---------- */
+
+function setupStopButton() {
+  const btn = document.getElementById('btn-stop');
+  if (!btn) return;
+  btn.addEventListener('click', async () => {
+    if (!confirm('Stop simulation and quit the server?')) return;
+    try {
+      btn.disabled = true;
+      btn.textContent = 'Stopping...';
+      // Attempt to notify server to stop — server will terminate shortly after responding
+      await fetch('/api/stop', { method: 'POST' });
+    } catch (e) {
+      // best-effort; disable button so user doesn't repeatedly hit it
+      btn.textContent = 'Stopping...';
+    }
+    // Close websockets as a fallback to stop UI activity
+    try { if (state.ws) state.ws.close(); if (state.wsFrames) state.wsFrames.close(); } catch (e) {}
   });
 }
 

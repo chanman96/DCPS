@@ -68,6 +68,29 @@ def default_boost_map() -> list[list[float]]:
     return rows
 
 
+# ---------- Transmission (digital-twin gear model) ----------
+#
+# Automated 10-speed Class-8 gearbox, modeled as a speed-banded gear selector.
+# Gear is a *derived* readout (like a real TCU broadcasting SPN 523 over J1939):
+# it doesn't feed back into the RPM/speed physics loop, so it can't destabilize
+# the rest of the model — it only produces a brief torque-interruption dip in
+# engine load while a shift is "in flight", which ripples visibly into fuel/boost.
+
+GEAR_MAX_KPH = [10, 16, 23, 31, 41, 53, 67, 82, 97, 10**6]  # upper speed bound per gear (1..10)
+SHIFT_DURATION_S = 0.6     # clutch/AMT torque-interruption window
+SHIFT_COOLDOWN_S = 1.0     # minimum time between shifts (prevents gear hunting)
+
+
+def _gear_for_speed(speed_kph: float) -> int:
+    """0 = Neutral (stationary), 1..10 = forward gears."""
+    if speed_kph < 1.5:
+        return 0
+    for gear, cap in enumerate(GEAR_MAX_KPH, start=1):
+        if speed_kph <= cap:
+            return gear
+    return 10
+
+
 def _map_lookup(m: list[list[float]], rpm: float, load_pct: float) -> float:
     """Bilinear lookup on an 8x8 map. RPM in [600, 2200], load in [0, 100]."""
     rpm_norm = max(0, min(1, (rpm - 600) / 1600)) * (MAP_SIZE - 1)
@@ -119,6 +142,10 @@ class EcuState:
     battery_voltage: float = 27.8
     ignition_on: bool = True
 
+    # Transmission (digital-twin gear readout)
+    current_gear: int = 0
+    gear_shifting: bool = False
+
     # Aggregated fuel stats
     fuel_capacity_l: float = 400
     fuel_used_l_since_start: float = 0
@@ -152,6 +179,12 @@ class Vehicle:
         self._fuel_econ_window_l = 0
         self._fuel_econ_window_km = 0
         self._econ_reset_s = 0
+        # Transmission shift state
+        self._gear_target = 0
+        self._gear_shift_timer = 0.0
+        self._gear_cooldown = 0.0
+        # Fuel-map derived power factor (ECU tuning -> driver throttle response)
+        self.power_factor = 1.0
 
     # ---- Driver inputs (called by Simulator with route info) ----
 
@@ -189,13 +222,34 @@ class Vehicle:
             e.engine_load_pct = 0
             e.accel_pedal_pct = 0
             e.fuel_rate_lph = 0
+            e.current_gear = 0
+            e.gear_shifting = False
             self._decay_thermals(dt)
             self._apply_common_effects(coolant_bias, oil_pressure_bias, battery_bias, fuel_siphon)
+            # A tapped line / siphon still drains the tank while parked with ignition off —
+            # this branch used to skip that entirely, silently no-opping the fault.
+            if fuel_siphon:
+                tank_liters = e.fuel_level_pct / 100 * e.fuel_capacity_l
+                tank_liters = max(0, tank_liters - fuel_siphon)
+                e.fuel_level_pct = tank_liters / e.fuel_capacity_l * 100
+                e.fuel_level_2_pct = e.fuel_level_pct
+                ecu_dict["fuel_siphon_liters"] = 0
             self._sync_out(ecu_dict)
             return
 
+        # ---- ECU tuning -> driver throttle response ("act" step feeding back onto the driver) ----
+        # A leaner/detuned fuel map makes less torque available per unit throttle, so for the
+        # same target speed the driver has to hold more pedal for longer to get there. That shows
+        # up downstream as pedal position pinned high and speed variance the driver model reads
+        # as fatigue — this is the closed loop the ECU-maps tab visualizes.
+        avg_fuel_duty = sum(sum(row) for row in e.fuel_map) / (MAP_SIZE * MAP_SIZE)
+        self.power_factor = max(0.55, min(1.3, avg_fuel_duty / 53.9))
+
         # ---- RPM/speed dynamics ----
-        target_rpm = e.idle_rpm_target + self._driver_throttle * (min(e.rev_limit_rpm, 2200) - e.idle_rpm_target)
+        target_rpm = min(
+            e.rev_limit_rpm,
+            e.idle_rpm_target + self._driver_throttle * (min(e.rev_limit_rpm, 2200) - e.idle_rpm_target) * self.power_factor,
+        )
         # First-order tracking
         e.engine_rpm += (target_rpm - e.engine_rpm) * min(1, dt / 0.4)
         e.engine_rpm += self.rng.gauss(0, rpm_noise * 0.3)
@@ -207,10 +261,25 @@ class Vehicle:
         e.vehicle_speed_kph += (target_speed - e.vehicle_speed_kph) * min(1, dt / 1.5)
         e.vehicle_speed_kph = max(0, e.vehicle_speed_kph - self._brake * 20 * dt)
 
+        # ---- Transmission: automated shift, derived from road speed ----
+        self._gear_cooldown = max(0, self._gear_cooldown - dt)
+        target_gear = _gear_for_speed(e.vehicle_speed_kph)
+        if self._gear_shift_timer > 0:
+            self._gear_shift_timer = max(0, self._gear_shift_timer - dt)
+            if self._gear_shift_timer == 0:
+                e.current_gear = self._gear_target
+        elif target_gear != e.current_gear and self._gear_cooldown <= 0:
+            self._gear_target = target_gear
+            self._gear_shift_timer = SHIFT_DURATION_S
+            self._gear_cooldown = SHIFT_COOLDOWN_S
+        e.gear_shifting = self._gear_shift_timer > 0
+
         # ---- Engine load ----
         rpm_frac = max(0, (e.engine_rpm - e.idle_rpm_target) / (e.rev_limit_rpm - e.idle_rpm_target))
         raw_load = 10 + 90 * (self._driver_throttle * (0.6 + 0.4 * rpm_frac))
         e.engine_load_pct += (raw_load - e.engine_load_pct) * min(1, dt / 0.8)
+        if e.gear_shifting:
+            e.engine_load_pct *= 0.4   # clutch/AMT torque interruption while a shift is in flight
         e.engine_load_pct = max(0, min(100, e.engine_load_pct - torque_loss))
         e.accel_pedal_pct = self._driver_throttle * 100
         e.engine_throttle_valve_pos_pct = e.accel_pedal_pct * 0.9
@@ -340,6 +409,9 @@ class Vehicle:
             "trip_distance_km": e.trip_distance_km,
             "battery_voltage": e.battery_voltage,
             "ignition_on": e.ignition_on,
+            "current_gear": e.current_gear,
+            "gear_shifting": e.gear_shifting,
+            "ecu_power_factor": round(self.power_factor, 3),
             "active_dtcs": self._active_dtcs,
             "source_addr": 0x00,
         }

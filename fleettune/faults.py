@@ -146,6 +146,23 @@ class FuelSiphon(Fault):
 
 
 @dataclass
+class FuelTheft(Fault):
+    """Continuous drain from a tapped line / bypassed sender — unlike FuelSiphon this runs
+    whether the truck is parked or moving, mimicking theft during a delivery run rather than
+    only while parked overnight. No DTC — only the fuel-theft anomaly detector catches this."""
+    kind: str = "fuel_theft"
+    develop_seconds: float = 20.0
+    liters_per_second: float = 0.08   # ~5 L/min tap
+
+    def _apply(self, dt, ecu):
+        rate = self.liters_per_second * (0.35 if self.phase == Phase.DEVELOPING else 1.0)
+        ecu["fuel_siphon_liters"] = ecu.get("fuel_siphon_liters", 0) + rate * dt
+
+    def dtc(self):
+        return None   # theft, not a diagnostic condition
+
+
+@dataclass
 class DrowsyDriver(Fault):
     """Modifies driver behavior: reduced steering micro-corrections, occasional lane departures."""
     kind: str = "drowsy_driver"
@@ -173,6 +190,7 @@ FAULT_TYPES: dict[str, type[Fault]] = {
     "dpf_regen_required": DpfRegenRequired,
     "alternator_fault":   AlternatorFault,
     "fuel_siphon":        FuelSiphon,
+    "fuel_theft":         FuelTheft,
     "drowsy_driver":      DrowsyDriver,
 }
 
@@ -185,5 +203,6 @@ FAULT_LABELS = {
     "dpf_regen_required": "DPF regen required",
     "alternator_fault":   "Alternator undervoltage",
     "fuel_siphon":        "Fuel siphon (parked)",
+    "fuel_theft":         "Fuel theft (line tap, any state)",
     "drowsy_driver":      "Drowsy driver",
 }

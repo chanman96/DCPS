@@ -1,0 +1,53 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>FleetTune Admin</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-mark">◈</div>
+      <div class="brand-text">
+        <div class="brand-title">FleetTune · Admin</div>
+        <div class="brand-sub">Control center</div>
+      </div>
+    </div>
+    <div style="margin-left:auto;padding:10px"><a href="/" class="btn btn-ghost">Open dashboard</a></div>
+  </header>
+
+  <main style="padding:18px;max-width:900px">
+    <h2>Simulation controls</h2>
+    <div class="card" style="margin-bottom:12px">
+      <div class="kv"><span>Number of vehicles</span><input id="inp-n" type="number" min="1" max="200"></div>
+      <div class="kv"><span>Time scale</span><input id="inp-ts" type="number" step="0.1" min="0.01"></div>
+      <div style="margin-top:10px">
+        <button id="btn-reconf" class="btn">Apply</button>
+        <button id="btn-stop-sim" class="btn btn-ghost">Stop sim</button>
+        <button id="btn-start-sim" class="btn btn-ghost">Start sim</button>
+      </div>
+    </div>
+
+    <h3>Current config</h3>
+    <pre id="cfg" class="card"></pre>
+
+    <h2 style="margin-top:24px">Telemetry Excel log</h2>
+    <div class="card" style="margin-bottom:12px">
+      <div class="kv"><span>Status</span><span id="log-status" class="mono">—</span></div>
+      <div class="kv"><span>Rows written</span><span id="log-rows" class="mono">—</span></div>
+      <div class="kv"><span>Vehicles logged</span><span id="log-vehicles" class="mono">—</span></div>
+      <div class="kv"><span>File</span><span id="log-path" class="mono">—</span></div>
+      <div class="kv"><span>Interval</span><span class="mono">2.0 s per vehicle (sim time)</span></div>
+      <div style="margin-top:10px">
+        <button id="btn-log-start" class="btn">Start logging</button>
+        <button id="btn-log-stop" class="btn btn-ghost">Stop logging</button>
+        <a id="btn-log-download" class="btn btn-ghost" href="/api/admin/logging/download">Download .xlsx</a>
+      </div>
+    </div>
+  </main>
+
+  <script src="/static/admin.js"></script>
+</body>
+</html>

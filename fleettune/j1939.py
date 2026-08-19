@@ -168,6 +168,18 @@ def encode_ic1(s: dict) -> bytes:
     ])
 
 
+def encode_etc1(s: dict) -> bytes:
+    """PGN 61445 (0xF005) ETC1 — Electronic Transmission Controller 1. 100 ms, priority 3."""
+    gear = s.get("current_gear", 0)
+    return bytes([
+        0xF0,                     # byte 0: transmission driveline engaged / lockup switches
+        _u8(gear + 125),          # SPN 523, current gear, offset -125 (0 = Neutral)
+        _u8(gear + 125),          # SPN 524, selected gear (AMT: no separate lever position)
+        0xFF, 0xFF,               # bytes 3-4: output shaft speed (not modeled)
+        0xFF, 0xFF, 0xFF,
+    ])
+
+
 def encode_hours(s: dict) -> bytes:
     """PGN 65253 (0xFEE5) HOURS — Engine hours & revolutions. On request or 1 s."""
     hrs = _u32_le(s["engine_total_hours"] / 0.05)  # SPN 247, 0.05 h/bit
@@ -237,6 +249,7 @@ PGN_REGISTRY: list[PgnSpec] = [
     PgnSpec(65262, "ET1",    6, 1000, encode_et1),
     PgnSpec(65263, "EFL/P1", 6,  500, encode_efl_p1),
     PgnSpec(65266, "LFE1",   3,  100, encode_lfe1),
+    PgnSpec(61445, "ETC1",   3,  100, encode_etc1),
     PgnSpec(65265, "CCVS1",  6,  100, encode_ccvs1),
     PgnSpec(65270, "IC1",    6,  500, encode_ic1),
     PgnSpec(65253, "HOURS",  6, 1000, encode_hours),

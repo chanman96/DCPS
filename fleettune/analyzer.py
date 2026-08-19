@@ -210,6 +210,18 @@ class Analyzer:
                 ts, ts, lat, lng)
             emitted.append(self._touch_alert((vehicle_id, "drowsy_warn"), make))
 
+        # ---- 6b. Aggressive driving pattern (harsh braking / acceleration) ----
+        harsh = driver.get("harsh_brake_count", 0) + driver.get("harsh_accel_count", 0)
+        if harsh >= 3:
+            def make(ts): return Alert(
+                vehicle_id, "aggressive_driving", "safety",
+                "critical" if harsh >= 6 else "warn",
+                "Aggressive driving pattern",
+                f"{driver.get('harsh_brake_count', 0)} harsh brake / {driver.get('harsh_accel_count', 0)} "
+                f"harsh accel event(s) in the last 10 min. Driver score {driver.get('driver_score', 0):.0f}/100.",
+                ts, ts, lat, lng)
+            emitted.append(self._touch_alert((vehicle_id, "aggressive_driving"), make))
+
         # ---- 7. DPF regen needed (proxy: sustained low economy + high EGT) ----
         if snap["exhaust_gas_temp_c"] > 500 and len(hist.fuel_econ) >= 120:
             recent_econ = mean(list(hist.fuel_econ)[-120:])

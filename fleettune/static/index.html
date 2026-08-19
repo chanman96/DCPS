@@ -39,6 +39,10 @@
       <div class="stat-label">Uplink</div>
       <div class="stat-value stat-uplink"><span class="pulse-dot" id="pulse"></span><span id="stat-uplink">connecting</span></div>
     </div>
+    <div class="stat">
+      <div class="stat-label">Server</div>
+      <div class="stat-value"><button id="btn-stop" class="btn">Stop server</button></div>
+    </div>
   </div>
 </header>
 
@@ -99,6 +103,15 @@
           <div class="kv"><span>Fatigue score</span><span id="d-fatigue" class="mono fatigue">—</span></div>
           <div class="fatigue-bar"><div id="fatigue-fill" class="fatigue-fill"></div></div>
           <div class="kv"><span>Lane departures (recent)</span><span id="d-lanes" class="mono">—</span></div>
+        </div>
+        <div class="card">
+          <div class="card-title">Driving behavior</div>
+          <div class="kv"><span>Driver score</span><span id="d-score" class="mono fatigue">—</span></div>
+          <div class="fatigue-bar"><div id="score-fill" class="fatigue-fill"></div></div>
+          <div class="kv"><span>Harsh brakes (10 min)</span><span id="d-harsh-brake" class="mono">—</span></div>
+          <div class="kv"><span>Harsh accel (10 min)</span><span id="d-harsh-accel" class="mono">—</span></div>
+          <div class="kv"><span>Idle time</span><span id="d-idle" class="mono">—</span></div>
+          <div class="kv"><span>Idle fuel wasted</span><span id="d-idle-fuel" class="mono">—</span></div>
         </div>
         <div class="card">
           <div class="card-title">Active DTCs</div>
@@ -180,6 +193,20 @@
       <div class="closed-loop-note">
         <span class="loop-icon">↻</span>
         <span>Sense → Decide → Act → <b>Sense again</b>. Watch RPM/boost/fuel-rate on Vehicle detail shift within ~2 s of any edit.</span>
+      </div>
+
+      <div class="tune-events-card">
+        <div class="tune-events-head">
+          <div class="tune-events-title">ECU tuning → driver behavior</div>
+          <div class="tune-events-sub">
+            ECU power factor <span id="tune-power-factor" class="mono">—</span> ·
+            derived from the fuel map — a leaner map means less torque per throttle input, so the
+            driver has to hold more pedal for longer to hit the same target speed. Every edit below
+            is logged with the driver's state at that instant, so you can compare it against the
+            live values on the right.
+          </div>
+        </div>
+        <div id="tune-events-list" class="tune-events-list"><div class="empty">No ECU edits yet this session</div></div>
       </div>
     </section>
 

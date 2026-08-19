@@ -3,11 +3,12 @@ FastAPI application — telematics gateway + dashboard host.
 """
 from __future__ import annotations
 import asyncio
+import os, signal
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -52,12 +53,18 @@ def create_app(sim: FleetSimulator) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        task = asyncio.create_task(sim.run())
+        # Use simulator.start() so admin can re-start later if needed
         try:
+            sim.start()
             yield
         finally:
             sim.stop()
-            task.cancel()
+            # cancel background task if present
+            if getattr(sim, "_task", None):
+                try:
+                    sim._task.cancel()
+                except Exception:
+                    pass
 
     app = FastAPI(title="FleetTune", lifespan=lifespan)
     app.state.simulator = sim
@@ -68,6 +75,11 @@ def create_app(sim: FleetSimulator) -> FastAPI:
     @app.get("/", response_class=HTMLResponse)
     async def index():
         return (STATIC_DIR / "index.html").read_text()
+
+    # Admin UI (separate control center)
+    @app.get("/admin", response_class=HTMLResponse)
+    async def admin_index():
+        return (STATIC_DIR / "admin.html").read_text()
 
     # ----- REST: fleet directory -----
     @app.get("/api/fleet")
@@ -80,6 +92,10 @@ def create_app(sim: FleetSimulator) -> FastAPI:
         m = sim.get_maps(vid)
         if not m: raise HTTPException(404, "unknown vehicle")
         return m
+
+    @app.get("/api/vehicle/{vid}/tune-events")
+    async def tune_events(vid: str):
+        return {"events": sim.get_tune_events(vid)}
 
     # ----- REST: control -----
     @app.post("/api/fault/inject")
@@ -117,6 +133,80 @@ def create_app(sim: FleetSimulator) -> FastAPI:
     @app.get("/api/alerts")
     async def alerts():
         return {"alerts": sim.analyzer.all_alerts()}
+
+    @app.post("/api/stop")
+    async def stop_server():
+        """Stop the simulator and terminate the running process shortly after responding.
+
+        The small delay ensures the HTTP response can be sent back to the browser before
+        the process receives SIGTERM.
+        """
+        sim.stop()
+        async def _killer():
+            await asyncio.sleep(0.5)
+            # send the termination signal to the current process
+            os.kill(os.getpid(), signal.SIGTERM)
+        # schedule background task to terminate process
+        asyncio.create_task(_killer())
+        return {"ok": True, "message": "shutting down"}
+
+    # ----- Admin API (control center) -----
+    @app.get("/api/admin/config")
+    async def admin_config():
+        return sim.get_config()
+
+    @app.post("/api/admin/reconfigure")
+    async def admin_reconfigure(payload: dict):
+        # Accept keys: n_vehicles, time_scale
+        n = payload.get("n_vehicles")
+        ts = payload.get("time_scale")
+        if n is None and ts is None:
+            raise HTTPException(400, "nothing to change")
+        try:
+            if n is not None:
+                n = int(n)
+                if n < 1 or n > 200:
+                    raise HTTPException(400, "n_vehicles out of range")
+            if ts is not None:
+                ts = float(ts)
+        except ValueError:
+            raise HTTPException(400, "invalid parameter types")
+        sim.reconfigure(n_vehicles=n, time_scale=ts)
+        return {"ok": True, "config": sim.get_config()}
+
+    @app.post("/api/admin/start")
+    async def admin_start():
+        started = sim.start()
+        return {"ok": True, "started": started}
+
+    @app.post("/api/admin/stop")
+    async def admin_stop():
+        sim.stop()
+        return {"ok": True}
+
+    # ----- Admin API (Excel telemetry logging) -----
+    @app.get("/api/admin/logging/status")
+    async def logging_status():
+        return sim.excel_logger.status()
+
+    @app.post("/api/admin/logging/start")
+    async def logging_start():
+        path = sim.excel_logger.start()
+        return {"ok": True, "path": str(path)}
+
+    @app.post("/api/admin/logging/stop")
+    async def logging_stop():
+        sim.excel_logger.stop()
+        return {"ok": True}
+
+    @app.get("/api/admin/logging/download")
+    async def logging_download():
+        path = sim.excel_logger.flush()
+        if not path or not path.exists():
+            raise HTTPException(404, "no telemetry log yet")
+        return FileResponse(
+            path, filename=path.name,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
     # ----- WebSockets -----
     @app.websocket("/ws/telemetry")
