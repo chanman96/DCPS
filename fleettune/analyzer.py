@@ -78,9 +78,13 @@ class VehicleHistory:
 
 
 class Analyzer:
-    def __init__(self):
+    def __init__(self, on_new_alert=None):
         self.history: dict[str, VehicleHistory] = defaultdict(VehicleHistory)
         self.alerts: dict[tuple[str, str], Alert] = {}
+        # Called once, with the Alert, the moment a (vehicle, kind) pair is first created —
+        # not on every re-touch of an already-active alert. Used to fan alerts out to
+        # external channels (e.g. email) without analyzer.py knowing anything about them.
+        self.on_new_alert = on_new_alert
 
     def _touch_alert(self, key, factory) -> Alert:
         now = time.time()
@@ -90,18 +94,38 @@ class Analyzer:
             return a
         a = factory(now)
         self.alerts[key] = a
+        if self.on_new_alert:
+            try:
+                self.on_new_alert(a)
+            except Exception:
+                pass
         return a
 
     def analyze(self, vehicle_id: str, snap: dict, driver: dict,
-                lat: float | None = None, lng: float | None = None) -> list[Alert]:
+                lat: float | None = None, lng: float | None = None,
+                faults: dict | None = None) -> list[Alert]:
         now = time.time()
         hist = self.history[vehicle_id]
         hist.push(now, snap)
+        faults = faults or {}
 
         emitted: list[Alert] = []
 
         # ---- 1. Coolant trend (thermostat / cooling) ----
-        if len(hist.coolant) >= 240:
+        # An injected coolant_overheat fault fires this immediately off the live reading —
+        # it doesn't need to wait for the 2-minute rolling window below, which exists only
+        # to catch genuine ambient drift with no fault behind it.
+        if faults.get("coolant_overheat") == "active":
+            temp = snap["coolant_temp_c"]
+            if temp > 90:
+                def make(ts): return Alert(
+                    vehicle_id, "coolant_trend", "maintenance",
+                    "warn" if temp < 105 else "critical",
+                    "Coolant trending high under load",
+                    f"Coolant at {temp:.1f}°C and climbing. Likely thermostat or cooling loop degradation.",
+                    ts, ts, lat, lng)
+                emitted.append(self._touch_alert((vehicle_id, "coolant_trend"), make))
+        elif len(hist.coolant) >= 240:
             window = list(hist.coolant)[-240:]
             load_window = list(hist.load)[-240:]
             # trend °C over last 2 min under steady moderate+ load
@@ -119,7 +143,17 @@ class Analyzer:
                     emitted.append(self._touch_alert((vehicle_id, "coolant_trend"), make))
 
         # ---- 2. Oil pressure decay ----
-        if len(hist.oil_pressure) >= 240:
+        if faults.get("oil_pressure_low") == "active":
+            op = snap["engine_oil_pressure_kpa"]
+            if op < 250:
+                def make(ts): return Alert(
+                    vehicle_id, "oil_pressure_decay", "maintenance",
+                    "warn" if op > 100 else "critical",
+                    "Oil pressure trending down at cruise RPM",
+                    f"Oil pressure at {op:.0f} kPa and falling. Investigate oil pump, bearings, or oil dilution.",
+                    ts, ts, lat, lng)
+                emitted.append(self._touch_alert((vehicle_id, "oil_pressure_decay"), make))
+        elif len(hist.oil_pressure) >= 240:
             op = list(hist.oil_pressure)[-240:]
             rpm_w = list(hist.rpm)[-240:]
             if mean(rpm_w) > 1000:
@@ -135,7 +169,15 @@ class Analyzer:
                     emitted.append(self._touch_alert((vehicle_id, "oil_pressure_decay"), make))
 
         # ---- 3. Boost below expected ----
-        if len(hist.boost) >= 60:
+        if faults.get("turbo_boost_loss") == "active":
+            def make(ts): return Alert(
+                vehicle_id, "boost_low", "maintenance", "warn",
+                "Boost pressure below expected for load",
+                f"Actual {snap['boost_pressure_kpa']:.0f} kPa, well under normal. "
+                "Possible turbo, actuator, or intake leak.",
+                ts, ts, lat, lng)
+            emitted.append(self._touch_alert((vehicle_id, "boost_low"), make))
+        elif len(hist.boost) >= 60:
             bw = list(hist.boost)[-60:]
             lw = list(hist.load)[-60:]
             expected = 20 + 1.8 * mean(lw)
@@ -160,7 +202,17 @@ class Analyzer:
             emitted.append(self._touch_alert((vehicle_id, "battery_low"), make))
 
         # ---- 5. Fuel theft — key check ----
-        if len(hist.fuel_level) >= 20:
+        # fuel_siphon only actually drains fuel once the vehicle is parked with ignition
+        # off (see faults.py), so the immediate path still checks that live state — it just
+        # no longer waits 10s of matching history to confirm it.
+        if faults.get("fuel_siphon") == "active" and snap["vehicle_speed_kph"] < 2 and not snap["ignition_on"]:
+            def make(ts): return Alert(
+                vehicle_id, "fuel_theft_parked", "security", "critical",
+                "Suspected fuel theft while parked",
+                "Fuel draining while parked with ignition off — no legitimate consumption should be occurring.",
+                ts, ts, lat, lng)
+            emitted.append(self._touch_alert((vehicle_id, "fuel_theft_parked"), make))
+        elif len(hist.fuel_level) >= 20:
             recent = list(hist.fuel_level)[-20:]
             speeds = list(hist.speed)[-20:]
             ignitions = list(hist.ignition)[-20:]
@@ -174,22 +226,28 @@ class Analyzer:
                     ts, ts, lat, lng)
                 emitted.append(self._touch_alert((vehicle_id, "fuel_theft_parked"), make))
 
-            # Anomalous drop while moving vs expected consumption
-            if len(hist.fuel_level) >= 60:
-                fuel_60 = list(hist.fuel_level)[-60:]
-                fuel_delta_l = (fuel_60[0] - fuel_60[-1]) / 100 * 400
-                # Expected fuel used = integral of fuel rate over 30s (rough, since 2Hz)
-                fr = list(snap.get("_recent_fuel_rate", [snap["fuel_rate_lph"]]))
-                # rough expected: L/h * (30s/3600)
-                expected_l = snap["fuel_rate_lph"] * (30 / 3600)
-                if fuel_delta_l > max(0.6, expected_l * 3.5) and mean(list(hist.speed)[-60:]) > 5:
-                    def make(ts): return Alert(
-                        vehicle_id, "fuel_theft_moving", "security", "warn",
-                        "Fuel level dropping faster than consumption",
-                        f"Tank -{fuel_delta_l:.1f} L in 30s, expected ~{expected_l:.2f} L from injection. "
-                        "Investigate line leak or sender fault.",
-                        ts, ts, lat, lng)
-                    emitted.append(self._touch_alert((vehicle_id, "fuel_theft_moving"), make))
+        # Anomalous drop while moving vs expected consumption — fuel_theft runs regardless
+        # of speed/ignition (see faults.py), so it fires the moment it's active.
+        if faults.get("fuel_theft") == "active":
+            def make(ts): return Alert(
+                vehicle_id, "fuel_theft_moving", "security", "warn",
+                "Fuel level dropping faster than consumption",
+                "Tank draining faster than engine consumption. Investigate line leak or sender fault.",
+                ts, ts, lat, lng)
+            emitted.append(self._touch_alert((vehicle_id, "fuel_theft_moving"), make))
+        elif len(hist.fuel_level) >= 60:
+            fuel_60 = list(hist.fuel_level)[-60:]
+            fuel_delta_l = (fuel_60[0] - fuel_60[-1]) / 100 * 400
+            # rough expected: L/h * (30s/3600)
+            expected_l = snap["fuel_rate_lph"] * (30 / 3600)
+            if fuel_delta_l > max(0.6, expected_l * 3.5) and mean(list(hist.speed)[-60:]) > 5:
+                def make(ts): return Alert(
+                    vehicle_id, "fuel_theft_moving", "security", "warn",
+                    "Fuel level dropping faster than consumption",
+                    f"Tank -{fuel_delta_l:.1f} L in 30s, expected ~{expected_l:.2f} L from injection. "
+                    "Investigate line leak or sender fault.",
+                    ts, ts, lat, lng)
+                emitted.append(self._touch_alert((vehicle_id, "fuel_theft_moving"), make))
 
         # ---- 6. Drowsiness ----
         score = driver.get("fatigue_score", 0)
@@ -223,7 +281,15 @@ class Analyzer:
             emitted.append(self._touch_alert((vehicle_id, "aggressive_driving"), make))
 
         # ---- 7. DPF regen needed (proxy: sustained low economy + high EGT) ----
-        if snap["exhaust_gas_temp_c"] > 500 and len(hist.fuel_econ) >= 120:
+        if faults.get("dpf_regen_required") == "active":
+            def make(ts): return Alert(
+                vehicle_id, "dpf_regen", "maintenance", "warn",
+                "DPF regeneration likely needed",
+                f"EGT {snap['exhaust_gas_temp_c']:.0f}°C, fuel economy falling. "
+                "Schedule active regen at next stop.",
+                ts, ts, lat, lng)
+            emitted.append(self._touch_alert((vehicle_id, "dpf_regen"), make))
+        elif snap["exhaust_gas_temp_c"] > 500 and len(hist.fuel_econ) >= 120:
             recent_econ = mean(list(hist.fuel_econ)[-120:])
             if 0 < recent_econ < 1.5:
                 def make(ts): return Alert(

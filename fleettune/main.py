@@ -4,6 +4,7 @@ FastAPI application — telematics gateway + dashboard host.
 from __future__ import annotations
 import asyncio
 import os, signal
+import subprocess
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -18,6 +19,51 @@ from .presets import ECU_PRESETS, PRESET_ORDER
 
 
 STATIC_DIR = Path(__file__).parent / "static"
+PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
+
+
+def _find_sibling_run_processes(exclude_pid: int) -> list[int]:
+    """Find PIDs of other `python run.py` processes for THIS project (matched by resolved
+    project root, not just the literal string "run.py" — that alone would risk matching an
+    unrelated project's script of the same name). Best-effort: if `ps`/`lsof` aren't
+    available the caller just falls back to killing its own process, same as before.
+
+    This exists because "Stop simulation" only ever killed the one process that received
+    the click — a second instance started from an IDE or a stray terminal kept running,
+    kept ticking its own sim loop, and kept sending alert emails, with no visible link back
+    to the browser tab someone had just used to "stop" everything.
+    """
+    pids: list[int] = []
+    try:
+        out = subprocess.run(["ps", "-eo", "pid=,command="],
+                              capture_output=True, text=True, timeout=5).stdout
+    except Exception:
+        return pids
+    for line in out.splitlines():
+        line = line.strip()
+        if not line or "run.py" not in line:
+            continue
+        pid_str, _, cmd = line.partition(" ")
+        try:
+            pid = int(pid_str)
+        except ValueError:
+            continue
+        if pid == exclude_pid:
+            continue
+        if PROJECT_ROOT in cmd:
+            pids.append(pid)
+            continue
+        # Launched as a bare "python run.py" from inside the project dir — the command
+        # line has no path in it, so fall back to checking the process's working directory.
+        try:
+            cwd_out = subprocess.run(["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"],
+                                      capture_output=True, text=True, timeout=3).stdout
+            cwd = next((l[1:] for l in cwd_out.splitlines() if l.startswith("n")), None)
+            if cwd == PROJECT_ROOT:
+                pids.append(pid)
+        except Exception:
+            pass
+    return pids
 
 
 # Simulator lives on app.state — configured by run.py before startup
@@ -50,6 +96,14 @@ class MapUpdate(BaseModel):
 class PresetAction(BaseModel):
     vehicle_id: str
     preset: str
+
+class EmailConfig(BaseModel):
+    smtp_host: str | None = None      # e.g. "smtp.gmail.com"
+    smtp_port: int | None = None      # e.g. 587
+    smtp_user: str | None = None      # e.g. "you@gmail.com"
+    smtp_password: str | None = None  # e.g. a Google "App Password"
+    to_addr: str | None = None        # where alerts are delivered
+    min_severity: str | None = None   # "warn" | "critical"
 
 
 # ---------- App factory ----------
@@ -154,19 +208,43 @@ def create_app(sim: FleetSimulator) -> FastAPI:
 
     @app.post("/api/stop")
     async def stop_server():
-        """Stop the simulator and terminate the running process shortly after responding.
+        """Stop the simulator and terminate every FleetTune run.py process for this
+        project — not just the one serving this request — shortly after responding.
 
         The small delay ensures the HTTP response can be sent back to the browser before
-        the process receives SIGTERM.
+        any process receives a termination signal.
         """
         sim.stop()
+        my_pid = os.getpid()
         async def _killer():
             await asyncio.sleep(0.5)
-            # send the termination signal to the current process
-            os.kill(os.getpid(), signal.SIGTERM)
-        # schedule background task to terminate process
+            # Deal with sibling processes fully *before* signaling self — once this
+            # process gets its own SIGTERM, uvicorn's shutdown can tear down the event
+            # loop at any point, so anything scheduled after that isn't guaranteed to run.
+            sibling_pids = _find_sibling_run_processes(exclude_pid=my_pid)
+            for pid in sibling_pids:
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+            if sibling_pids:
+                await asyncio.sleep(1.0)
+                for pid in sibling_pids:
+                    try:
+                        os.kill(pid, signal.SIGKILL)   # some instances don't respond to SIGTERM promptly
+                    except ProcessLookupError:
+                        pass
+            os.kill(my_pid, signal.SIGTERM)
+            # Uvicorn's graceful shutdown doesn't always exit promptly on SIGTERM alone
+            # (observed hanging past several seconds) — force it if it's still around.
+            await asyncio.sleep(1.0)
+            try:
+                os.kill(my_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        # schedule background task to terminate all processes
         asyncio.create_task(_killer())
-        return {"ok": True, "message": "shutting down"}
+        return {"ok": True, "message": "shutting down all FleetTune processes"}
 
     # ----- Admin API (control center) -----
     @app.get("/api/admin/config")
@@ -187,6 +265,8 @@ def create_app(sim: FleetSimulator) -> FastAPI:
                     raise HTTPException(400, "n_vehicles out of range")
             if ts is not None:
                 ts = float(ts)
+                if ts <= 0 or ts > 50:
+                    raise HTTPException(400, "time_scale out of range")
         except ValueError:
             raise HTTPException(400, "invalid parameter types")
         sim.reconfigure(n_vehicles=n, time_scale=ts)
@@ -209,13 +289,32 @@ def create_app(sim: FleetSimulator) -> FastAPI:
 
     @app.post("/api/admin/logging/start")
     async def logging_start():
-        path = sim.excel_logger.start()
+        path = sim.enable_logging()
         return {"ok": True, "path": str(path)}
 
     @app.post("/api/admin/logging/stop")
     async def logging_stop():
-        sim.excel_logger.stop()
+        sim.disable_logging()
         return {"ok": True}
+
+    # ----- Admin API (email alert delivery) -----
+    @app.get("/api/admin/email/status")
+    async def email_status():
+        return sim.notifier.status()
+
+    @app.post("/api/admin/email/configure")
+    async def email_configure(cfg: EmailConfig):
+        if cfg.min_severity is not None and cfg.min_severity not in ("warn", "critical"):
+            raise HTTPException(400, "min_severity must be 'warn' or 'critical'")
+        sim.notifier.configure(**cfg.model_dump(exclude_unset=True))
+        return {"ok": True, "status": sim.notifier.status()}
+
+    @app.post("/api/admin/email/test")
+    async def email_test():
+        # send_test() makes a blocking SMTP call — run off the event loop so it can't
+        # stall the 10 Hz sim tick loop for the duration of the request.
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, sim.notifier.send_test)
 
     @app.get("/api/admin/logging/download")
     async def logging_download():

@@ -31,9 +31,11 @@ class Fault:
     # injection (0s) so effects are visible right away instead of ramping up.
     develop_seconds: float = 0.0
 
-    def start_developing(self):
+    def start_developing(self, ecu: dict | None = None):
         self.phase = Phase.DEVELOPING
         self.elapsed_s = 0.0
+        if ecu is not None:
+            self._on_inject(ecu)
 
     def clear(self):
         self.phase = Phase.INACTIVE
@@ -49,6 +51,12 @@ class Fault:
         self._apply(dt, ecu)
 
     def _apply(self, dt: float, ecu: dict):  # override in subclasses
+        pass
+
+    def _on_inject(self, ecu: dict):
+        """One-time kickstart applied the instant a fault is injected, so its effect (and
+        any alert tied to it) is visible right away instead of waiting for the per-tick
+        rate in _apply() to accumulate something noticeable. Override in subclasses."""
         pass
 
     def dtc(self) -> dict | None:
@@ -68,9 +76,15 @@ class CoolantOverheat(Fault):
     kind: str = "coolant_overheat"
     develop_seconds: float = 0.0
 
+    def _on_inject(self, ecu):
+        # Instant jump into alert-worthy territory — ecu_model.py also shortens the
+        # thermal-lag time constant while this bias is nonzero, so the live coolant
+        # reading catches up to it within a couple of seconds rather than tens of them.
+        ecu["coolant_bias_c"] = ecu.get("coolant_bias_c", 0) + 25
+
     def _apply(self, dt, ecu):
-        # Developing: slow drift +0.02°C/s above equilibrium; Active: +0.15°C/s
-        rate = 0.02 if self.phase == Phase.DEVELOPING else 0.15
+        # Developing: slow drift +0.02°C/s above equilibrium; Active: +0.6°C/s
+        rate = 0.02 if self.phase == Phase.DEVELOPING else 0.6
         ecu["coolant_bias_c"] = ecu.get("coolant_bias_c", 0) + rate * dt
 
 
@@ -78,6 +92,9 @@ class CoolantOverheat(Fault):
 class OilPressureDecay(Fault):
     kind: str = "oil_pressure_low"
     develop_seconds: float = 0.0
+
+    def _on_inject(self, ecu):
+        ecu["oil_pressure_bias_kpa"] = ecu.get("oil_pressure_bias_kpa", 0) - 150
 
     def _apply(self, dt, ecu):
         rate = 0.5 if self.phase == Phase.DEVELOPING else 3.0  # kPa/s decay
@@ -124,6 +141,9 @@ class DpfRegenRequired(Fault):
 class AlternatorFault(Fault):
     kind: str = "alternator_fault"
     develop_seconds: float = 0.0
+
+    def _on_inject(self, ecu):
+        ecu["battery_voltage_bias_v"] = ecu.get("battery_voltage_bias_v", 0) - 6
 
     def _apply(self, dt, ecu):
         drop = 0.3 if self.phase == Phase.DEVELOPING else 1.2

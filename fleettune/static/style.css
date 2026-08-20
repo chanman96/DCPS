@@ -336,6 +336,13 @@ html, body {
 }
 .kv:last-child { border-bottom: none; }
 .kv span:first-child { color: var(--text-dim); }
+.kv input[type=text], .kv input[type=password], .kv input[type=number], .kv select {
+  background: var(--bg-elev); color: var(--text); border: 1px solid var(--border-lit);
+  border-radius: var(--radius); padding: 6px 10px; font-family: var(--mono); font-size: 12px;
+  min-width: 220px;
+}
+.kv input:focus, .kv select:focus { outline: none; border-color: var(--amber-dim); }
+.notify-hint { margin-top: 10px; font-size: 11px; color: var(--text-mute); line-height: 1.5; }
 .fatigue.warn { color: var(--amber); }
 .fatigue.critical { color: var(--red); }
 

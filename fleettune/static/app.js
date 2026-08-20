@@ -805,7 +805,7 @@ function renderMap(elId, which, matrix, range, changed = new Map(), editable = t
         cell.classList.add('cell-readonly');
         cell.style.background = heatColorUsage(val, range[0], range[1]);
         cell.textContent = val >= 1 ? Number(val).toFixed(0) : '';
-        cell.title = `RPM bin ${ci} · Load bin ${r} · ${val.toFixed(0)}% of this driver's busiest cell`;
+        cell.title = `RPM bin ${ci} · TPS bin ${r} · ${val.toFixed(0)}% of this driver's busiest cell`;
       } else {
         cell.style.background = heatColor(val, range[0], range[1]);
         cell.textContent = Number(val).toFixed(0);
@@ -890,7 +890,7 @@ function setupStopButton() {
   const btn = document.getElementById('btn-stop');
   if (!btn) return;
   btn.addEventListener('click', async () => {
-    if (!confirm('Stop simulation and quit the server?')) return;
+    if (!confirm('Stop all FleetTune processes on this machine?')) return;
     try {
       btn.disabled = true;
       btn.textContent = 'Stopping...';

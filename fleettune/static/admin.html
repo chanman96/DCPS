@@ -46,6 +46,37 @@
         <a id="btn-log-download" class="btn btn-ghost" href="/api/admin/logging/download">Download .xlsx</a>
       </div>
     </div>
+
+    <h2 style="margin-top:24px">Email alerts</h2>
+    <div class="card" style="margin-bottom:12px">
+      <div class="kv"><span>Status</span><span id="em-status" class="mono">—</span></div>
+      <div class="kv"><span>Sent count</span><span id="em-sent" class="mono">—</span></div>
+      <div class="kv"><span>Last error</span><span id="em-error" class="mono">—</span></div>
+      <div class="kv"><span>SMTP host</span><input id="em-host" type="text" placeholder="smtp.gmail.com"></div>
+      <div class="kv"><span>SMTP port</span><input id="em-port" type="number" placeholder="587"></div>
+      <div class="kv"><span>SMTP username</span><input id="em-user" type="text" placeholder="you@gmail.com"></div>
+      <div class="kv"><span>SMTP password</span><input id="em-password" type="password" placeholder="leave blank to keep current"></div>
+      <div class="kv"><span>Send alerts to</span><input id="em-to" type="text" placeholder="you@gmail.com"></div>
+      <div class="kv">
+        <span>Minimum severity</span>
+        <select id="em-sev">
+          <option value="warn">Warn and above</option>
+          <option value="critical">Critical only</option>
+        </select>
+      </div>
+      <div style="margin-top:10px">
+        <button id="btn-em-save" class="btn">Save</button>
+        <button id="btn-em-test" class="btn btn-ghost">Send test email</button>
+      </div>
+      <p class="notify-hint">
+        Sends over SMTP — no paid upgrade, no business account. For Gmail: the SMTP username
+        is your full address, and the password must be a 16-character
+        <b>Google App Password</b> (Google Account → Security → 2-Step Verification → App
+        passwords) rather than your normal login password. New warn-or-critical alerts are
+        emailed automatically, at most one per alert every 5 minutes. Nothing is sent
+        anywhere until this is filled in and saved.
+      </p>
+    </div>
   </main>
 
   <script src="/static/admin.js"></script>

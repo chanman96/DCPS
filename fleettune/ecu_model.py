@@ -91,13 +91,19 @@ def _gear_for_speed(speed_kph: float) -> int:
     return 10
 
 
-def _bin_indices(rpm: float, load_pct: float) -> tuple[int, int]:
-    """Nearest (load, rpm) bin for a given engine state — same grid as the calibration maps,
-    but a single nearest cell rather than _map_lookup's bilinear blend, since this feeds a
-    dwell-time histogram rather than an interpolated readout."""
+def _bin_indices(rpm: float, tps_pct: float) -> tuple[int, int]:
+    """Nearest (tps, rpm) bin for a given engine state — same 8x8 grid as the calibration
+    maps, but a single nearest cell rather than _map_lookup's bilinear blend, since this
+    feeds a dwell-time histogram rather than an interpolated readout.
+
+    Uses throttle position rather than engine load for the second axis: load is itself
+    driven mostly by (throttle, rpm) in this model, so a load/rpm heatmap collapses onto a
+    near-diagonal streak. Pedal position vs rpm decorrelates better — a driver can floor it
+    at low rpm (launch) or feather off at high rpm (coast/downshift lag) — so both axes
+    actually spread out instead of only the rpm axis showing variation."""
     rpm_norm = max(0, min(1, (rpm - 600) / 1600)) * (MAP_SIZE - 1)
-    load_norm = max(0, min(1, load_pct / 100)) * (MAP_SIZE - 1)
-    return int(round(load_norm)), int(round(rpm_norm))
+    tps_norm = max(0, min(1, tps_pct / 100)) * (MAP_SIZE - 1)
+    return int(round(tps_norm)), int(round(rpm_norm))
 
 
 USAGE_DECAY_TAU_S = 180.0  # recent-weighted so the heatmap tracks current driving, not all-session history
@@ -197,7 +203,7 @@ class Vehicle:
         self._gear_cooldown = 0.0
         # Fuel-map derived power factor (ECU tuning -> driver throttle response)
         self.power_factor = 1.0
-        # Driver usage heatmap: recent-weighted dwell time per RPM/load bin, same grid as
+        # Driver usage heatmap: recent-weighted dwell time per RPM/TPS bin, same grid as
         # the calibration maps — shows which cells this specific driver actually operates in.
         self.usage_seconds: list[list[float]] = [[0.0] * MAP_SIZE for _ in range(MAP_SIZE)]
 
@@ -240,7 +246,7 @@ class Vehicle:
             e.current_gear = 0
             e.gear_shifting = False
             self._decay_thermals(dt)
-            self._apply_common_effects(coolant_bias, oil_pressure_bias, battery_bias, fuel_siphon)
+            self._apply_common_effects(battery_bias)
             # A tapped line / siphon still drains the tank while parked with ignition off —
             # this branch used to skip that entirely, silently no-opping the fault.
             if fuel_siphon:
@@ -304,7 +310,7 @@ class Vehicle:
         for row in self.usage_seconds:
             for i in range(MAP_SIZE):
                 row[i] *= decay
-        li, ri = _bin_indices(e.engine_rpm, e.engine_load_pct)
+        li, ri = _bin_indices(e.engine_rpm, e.accel_pedal_pct)
         self.usage_seconds[li][ri] += dt
 
         # ---- ECU MAP LOOKUPS ("act" step visible here) ----
@@ -321,17 +327,30 @@ class Vehicle:
         e.boost_pressure_kpa = max(0, e.boost_pressure_kpa)
 
         # ---- Thermals (coupled with load) ----
-        equilibrium_coolant = 60 + 0.4 * e.engine_load_pct + 0.005 * e.engine_rpm
-        e.coolant_temp_c += (equilibrium_coolant - e.coolant_temp_c) * min(1, dt / 40)
+        # coolant_bias folds into the equilibrium a fault is nudging toward, rather than
+        # being added directly to the live value — coolant_bias_c accumulates every tick a
+        # fault is active (see faults.py), so adding it directly on top of the already-lagged
+        # temperature compounded into a near-instant jump to the 140°C cap. Folding it into
+        # the target keeps the physics coupled to thermal inertia instead of teleporting —
+        # but a fault-injected condition should still be visible in seconds, not tens of
+        # them, so the lag itself shortens sharply while a fault is actively biasing it.
+        equilibrium_coolant = 60 + 0.4 * e.engine_load_pct + 0.005 * e.engine_rpm + coolant_bias
+        coolant_tau = 3 if coolant_bias else 40
+        e.coolant_temp_c += (equilibrium_coolant - e.coolant_temp_c) * min(1, dt / coolant_tau)
+        e.coolant_temp_c = min(140, e.coolant_temp_c)
         e.oil_temp_c += (e.coolant_temp_c + 12 - e.oil_temp_c) * min(1, dt / 60)
         equilibrium_egt = 200 + 5 * e.engine_load_pct + 0.1 * timing * e.engine_load_pct
         e.exhaust_gas_temp_c += (equilibrium_egt - e.exhaust_gas_temp_c) * min(1, dt / 8)
         e.intake_manifold_temp_c = 25 + e.boost_pressure_kpa * 0.15
         e.fuel_temp_c += (25 + e.engine_load_pct * 0.2 - e.fuel_temp_c) * min(1, dt / 120)
 
-        # Oil pressure ~ RPM + oil temp effect
-        base_oil = 80 + 0.15 * e.engine_rpm - (max(0, e.oil_temp_c - 90)) * 1.5
-        e.engine_oil_pressure_kpa += (base_oil - e.engine_oil_pressure_kpa) * min(1, dt / 2)
+        # Oil pressure ~ RPM + oil temp effect. Same fix as coolant: oil_pressure_bias folds
+        # into the lag target instead of being re-added to the live value every tick, with a
+        # shorter lag while a fault is actively biasing it so injection reads out in seconds.
+        base_oil = 80 + 0.15 * e.engine_rpm - (max(0, e.oil_temp_c - 90)) * 1.5 + oil_pressure_bias
+        oil_tau = 0.8 if oil_pressure_bias else 2
+        e.engine_oil_pressure_kpa += (base_oil - e.engine_oil_pressure_kpa) * min(1, dt / oil_tau)
+        e.engine_oil_pressure_kpa = max(0, e.engine_oil_pressure_kpa)
 
         # Fuel delivery pressure follows load
         e.fuel_delivery_pressure_kpa = 400 + 1.2 * e.engine_load_pct
@@ -369,8 +388,8 @@ class Vehicle:
         # Engine hours
         e.engine_total_hours += dt / 3600
 
-        # Apply fault biases to output values
-        self._apply_common_effects(coolant_bias, oil_pressure_bias, battery_bias, 0)
+        # Apply remaining fault biases (coolant/oil are folded in above)
+        self._apply_common_effects(battery_bias)
 
         self._sync_out(ecu_dict)
 
@@ -382,11 +401,8 @@ class Vehicle:
         e.boost_pressure_kpa = 0
         e.fuel_rate_lph = 0
 
-    def _apply_common_effects(self, coolant_bias, oil_pressure_bias, battery_bias, fuel_siphon):
+    def _apply_common_effects(self, battery_bias):
         e = self.ecu
-        e.coolant_temp_c += coolant_bias
-        e.coolant_temp_c = min(140, e.coolant_temp_c)
-        e.engine_oil_pressure_kpa = max(0, e.engine_oil_pressure_kpa + oil_pressure_bias)
         e.battery_voltage = max(18, 27.8 + battery_bias)
 
     def _sync_out(self, ecu_dict: dict):

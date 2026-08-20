@@ -17,6 +17,7 @@ from .j1939 import build_frames, J1939Frame
 from .analyzer import Analyzer
 from .excel_logger import ExcelLogger, LOG_INTERVAL_S
 from .presets import ECU_PRESETS
+from .notifier import EmailNotifier
 
 
 TICK_HZ = 10   # 10 Hz ECU tick
@@ -35,6 +36,11 @@ HARSH_EVENT_WINDOW_S = 600   # "recent" harsh events considered for the driver s
 # that's what was making "aggressive driving" alerts fire on every vehicle within seconds
 # of a fresh start, before any actually aggressive driving had happened.
 HARSH_EVENT_COOLDOWN_S = 2.5
+# Deque capacity for harsh-event timestamps: worst case is one event every cooldown period,
+# sustained for the whole "recent" window, plus margin — must exceed
+# HARSH_EVENT_WINDOW_S / HARSH_EVENT_COOLDOWN_S or a maxed-out deque silently evicts events
+# that are still inside the window, undercounting the most persistently reckless drivers.
+HARSH_TS_MAXLEN = int(HARSH_EVENT_WINDOW_S / HARSH_EVENT_COOLDOWN_S) + 20
 
 
 @dataclass
@@ -56,8 +62,8 @@ class VehicleRuntime:
     last_frames: list[J1939Frame] = field(default_factory=list)
     # Driving-behavior tracking (harsh events, idling, ECU-tune change log)
     prev_speed_kph: float = 0.0
-    harsh_brake_ts: deque = field(default_factory=lambda: deque(maxlen=200))
-    harsh_accel_ts: deque = field(default_factory=lambda: deque(maxlen=200))
+    harsh_brake_ts: deque = field(default_factory=lambda: deque(maxlen=HARSH_TS_MAXLEN))
+    harsh_accel_ts: deque = field(default_factory=lambda: deque(maxlen=HARSH_TS_MAXLEN))
     harsh_brake_cooldown: float = 0.0
     harsh_accel_cooldown: float = 0.0
     idle_seconds: float = 0.0
@@ -70,13 +76,19 @@ class FleetSimulator:
         self.time_scale = time_scale
         self.n_vehicles = n_vehicles
         self.vehicles: dict[str, VehicleRuntime] = {}
-        self.analyzer = Analyzer()
+        self.notifier = EmailNotifier()
+        self.analyzer = Analyzer(on_new_alert=self.notifier.notify_alert)
         self.excel_logger = ExcelLogger()
         self.frame_stream_subscribers: set[asyncio.Queue] = set()
         self.telemetry_subscribers: set[asyncio.Queue] = set()
         self._running = False
         self._task: asyncio.Task | None = None
         self._log_flush_counter = 0
+        # Logging is on by default (so a fresh launch produces a log with no setup), but once
+        # the user explicitly starts/stops it via the admin panel that choice must survive a
+        # sim stop/restart — run() used to call excel_logger.start() unconditionally on every
+        # restart, silently reviving logging the user had just turned off.
+        self._logging_enabled = True
         # Build initial fleet
         self._build_fleet(n_vehicles)
 
@@ -122,7 +134,7 @@ class FleetSimulator:
         # a clean alerts board — vehicle IDs are deterministic (TRK-001, TRK-002, ...) so without
         # this, alerts and rolling history from the previous fleet would still be attached to the
         # new vehicles the moment they're built.
-        self.analyzer = Analyzer()
+        self.analyzer = Analyzer(on_new_alert=self.notifier.notify_alert)
         rng = random.Random(42)
         profiles = ["eco", "normal", "normal", "aggressive"]
         for i in range(n):
@@ -163,7 +175,7 @@ class FleetSimulator:
     def inject_fault(self, vid: str, kind: str) -> bool:
         rt = self.vehicles.get(vid)
         if not rt or kind not in rt.faults: return False
-        rt.faults[kind].start_developing()
+        rt.faults[kind].start_developing(rt._ecu_ctx)
         return True
 
     def clear_fault(self, vid: str, kind: str) -> bool:
@@ -318,7 +330,8 @@ class FleetSimulator:
 
     async def run(self):
         self._running = True
-        self.excel_logger.start()
+        if self._logging_enabled:
+            self.excel_logger.start()
         tick_dt = 1 / TICK_HZ * self.time_scale
         stream_every = TICK_HZ // STREAM_HZ
         counter = 0
@@ -353,7 +366,8 @@ class FleetSimulator:
                     # Analyzer
                     for rt in self.vehicles.values():
                         snap = rt.vehicle.snapshot()
-                        self.analyzer.analyze(rt.vid, snap, self._behavior_snapshot(rt), rt.lat, rt.lng)
+                        self.analyzer.analyze(rt.vid, snap, self._behavior_snapshot(rt), rt.lat, rt.lng,
+                                               self.fault_status(rt.vid))
                 if counter % LOG_TICKS == 0:
                     self._log_excel_snapshot(now)
 
@@ -364,6 +378,14 @@ class FleetSimulator:
 
     def stop(self):
         self._running = False
+
+    def enable_logging(self):
+        self._logging_enabled = True
+        return self.excel_logger.start()
+
+    def disable_logging(self):
+        self._logging_enabled = False
+        self.excel_logger.stop()
 
     # ---------- Driving behavior tracking ----------
 

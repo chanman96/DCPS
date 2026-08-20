@@ -104,9 +104,11 @@ class Driver:
             + departures_component
             + ecu.get("fatigue_push", 0)
         )
-        # Smooth toward raw
+        # Smooth toward raw — a lot faster while a drowsy-driver fault is actively pushing,
+        # so injecting the fault doesn't take tens of seconds to become visible.
         target = max(0, min(100, raw))
-        self.fatigue_score += (target - self.fatigue_score) * min(1, dt / 5)
+        tau = 1.5 if ecu.get("fatigue_push", 0) > 0 else 5
+        self.fatigue_score += (target - self.fatigue_score) * min(1, dt / tau)
 
     def snapshot(self) -> dict:
         return {
